@@ -16,7 +16,7 @@ def find_black(frame):
     return black_pixels
 
 def run_cam():
-    cap = cv.VideoCapture(1)
+    cap = cv.VideoCapture(0)
 
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -46,7 +46,7 @@ def run_cam():
         cv.imshow("Camera", frame)
         if cv.waitKey(1) & 0xFF == ord('q'):
             break
-
+        detect_flags()
         elapsed = time.time() - start
         sleep_time = frame_time - elapsed
         if sleep_time > 0:
@@ -55,6 +55,36 @@ def run_cam():
     cap.release()
     cv.destroyAllWindows()
 
+def detect_flags():
+    
+
+    cap = cv2.VideoCapture(0)
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        edges = cv2.Canny(blurred, 50, 150)
+
+        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        for contour in contours:
+            epsilon = 0.02 * cv2.arcLength(contour, True)
+            approx = cv2.approxPolyDP(contour, epsilon, True)
+            
+            # Yellow = (0, 255, 255) in BGR
+            cv2.drawContours(frame, [approx], -1, (0, 255, 255), 2)
+
+        cv2.imshow('Contour Approximation', frame)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
 
 
 def main():
