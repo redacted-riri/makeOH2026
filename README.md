@@ -30,3 +30,8 @@ Components Used:
 Libraries:
 openCV python
 adafruit-circuitpython-si7021
+
+Setup: 
+venv\Scripts\Activate.ps1
+pip install adafruit-blinka
+pip install opencv-python
