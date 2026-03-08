@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import math
+import numbers
 
 try:
     import matplotlib.pyplot as plt
@@ -141,7 +142,7 @@ def display_vectors_3d(points_3d, show_labels=True, show_points=True, title="3D 
 
 def _draw_2d_projection(ax, points_3d, vectors_info, show_labels, show_points):
     """
-    Draw 2D X-Y projection of 3D vectors.
+    Draw 2D X-Z projection of 3D vectors.
     
     Args:
         ax: Matplotlib axis to draw on.
@@ -151,42 +152,42 @@ def _draw_2d_projection(ax, points_3d, vectors_info, show_labels, show_points):
         show_points: Whether to show point markers.
     """
     xs = [p[0] for p in points_3d]
-    ys = [p[1] for p in points_3d]
+    zs = [p[2] for p in points_3d]
 
     if show_points:
-        ax.scatter(xs, ys, c="tab:blue", s=35, label="Points", zorder=3)
+        ax.scatter(xs, zs, c="tab:blue", s=35, label="Points", zorder=3)
         for i, p in enumerate(points_3d):
-            ax.text(p[0], p[1], f"P{i}", fontsize=8, ha='right')
+            ax.text(p[0], p[2], f"P{i}", fontsize=8, ha='right')
 
     # Draw vectors
     vector_ends_x = []
-    vector_ends_y = []
+    vector_ends_z = []
     
     for i, info in enumerate(vectors_info):
         p1 = info['from']
         p2 = info['to']
         
         # Draw arrow
-        ax.annotate('', xy=(p2[0], p2[1]), xytext=(p1[0], p1[1]),
+        ax.annotate('', xy=(p2[0], p2[2]), xytext=(p1[0], p1[2]),
                    arrowprops=dict(arrowstyle='->', color='tab:green', lw=2))
         
         vector_ends_x.append(p2[0])
-        vector_ends_y.append(p2[1])
+        vector_ends_z.append(p2[2])
         
         if show_labels:
             mid_x = (p1[0] + p2[0]) / 2
-            mid_y = (p1[1] + p2[1]) / 2
-            ax.text(mid_x, mid_y, f"L={info['length']:.2f}", 
+            mid_z = (p1[2] + p2[2]) / 2
+            ax.text(mid_x, mid_z, f"L={info['length']:.2f}", 
                    color="tab:red", fontsize=8, ha='center')
     
     # Draw red dots at vector endpoints
     if vector_ends_x:
-        ax.scatter(vector_ends_x, vector_ends_y, c="red", s=50, 
+        ax.scatter(vector_ends_x, vector_ends_z, c="red", s=50, 
                   label="Vector ends", marker='o', zorder=4)
     
-    ax.set_title("2D Projection (X-Y)")
+    ax.set_title("2D Projection (X-Z)")
     ax.set_xlabel("X")
-    ax.set_ylabel("Y")
+    ax.set_ylabel("Z")
     ax.grid(True, alpha=0.3)
     ax.legend(loc="best")
     ax.set_aspect('equal', adjustable='datalim')
@@ -291,8 +292,17 @@ class vector:
                 new_vector = tuple(self.vector[i] + other.vector[i] for i in range(len(self.vector)))
                 origin = tuple(0 for _ in range(len(new_vector)))
                 return vector(origin, new_vector)
-        else:
-            raise ValueError("Can only add another vector")
+        return NotImplemented
+
+    def __mul__(self, other):
+        if isinstance(other, numbers.Real):
+            new_vector = tuple(self.vector[i] * other for i in range(len(self.vector)))
+            origin = tuple(0 for _ in range(len(new_vector)))
+            return vector(origin, new_vector)
+        return NotImplemented
+
+    def __rmul__(self, other):
+        return self.__mul__(other)
     def mag(self):
         a = 0
         for i in range(len(self.vector)):
@@ -317,45 +327,173 @@ class vector:
             raise NotImplementedError("Spherical coordinates not implemented yet")
         if type1 == "cartesian" and type2 == "cartesian":
                 """Get DCM that rotates vector v to vector vx."""
-                vx = newspace.vector  / np.linalg.norm(np.array(newspace.vector))
-                v =self.vector / np.linalg.norm(np.array(self.vector))
-                
-                axis  = np.cross(v, vx)
-                angle = np.arccos(np.clip(np.dot(v, vx), -1, 1))
-                
-                # Rodrigues' rotation formula
-                K = np.array([[0, -axis[2], axis[1]],
-                            [axis[2], 0, -axis[0]],
-                            [-axis[1], axis[0], 0]])
-                
-                dcm = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * K @ K
+                v = np.array(self.vector, dtype=float)
+                vx = np.array(newspace.vector, dtype=float)
+
+                nv = np.linalg.norm(v)
+                nvx = np.linalg.norm(vx)
+                if nv == 0 or nvx == 0:
+                    raise ValueError("Cannot build DCM from zero-length vector")
+
+                v = v / nv
+                vx = vx / nvx
+                dot = float(np.clip(np.dot(v, vx), -1.0, 1.0))
+
+                if np.isclose(dot, 1.0):
+                    self.dcm = np.eye(3)
+                    return self.dcm
+
+                if np.isclose(dot, -1.0):
+                    # 180-degree case: choose any stable orthogonal axis.
+                    helper = np.array([1.0, 0.0, 0.0]) if not np.isclose(abs(v[0]), 1.0) else np.array([0.0, 1.0, 0.0])
+                    axis = np.cross(v, helper)
+                else:
+                    axis = np.cross(v, vx)
+
+                axis_norm = np.linalg.norm(axis)
+                if axis_norm == 0:
+                    self.dcm = np.eye(3)
+                    return self.dcm
+
+                axis = axis / axis_norm
+                angle = float(np.arccos(dot))
+
+                # Rodrigues' rotation formula using a unit axis.
+                K = np.array([[0.0, -axis[2], axis[1]],
+                              [axis[2], 0.0, -axis[0]],
+                              [-axis[1], axis[0], 0.0]])
+
+                dcm = np.eye(3) + np.sin(angle) * K + (1.0 - np.cos(angle)) * (K @ K)
                 self.dcm = dcm
-                return self.dcm        
+                return self.dcm
     def v2vxbidcm(self):
-        directioncosmat = self.dcm
-        v = list(self.vector)
-        self.vector = directioncosmat*v
+        if not hasattr(self, "dcm"):
+            raise ValueError("DCM is not set. Call convertspace() first.")
+
+        directioncosmat = np.array(self.dcm, dtype=float)
+        if directioncosmat.shape != (3, 3):
+            raise ValueError("DCM must be a 3x3 matrix")
+
+        v = np.array(self.vector, dtype=float)
+        if v.shape != (3,):
+            raise ValueError("Vector must be 3D to apply DCM")
+
+        rotated = directioncosmat @ v
+        self.vector = (float(rotated[0]), float(rotated[1]), float(rotated[2]))
+        return self.vector
 
     
         
 
 def sort_points(points):
     #sort points by y value hight o low
-    return sorted(points, key=lambda p: p[1], reverse=True)
+    return sorted(points, key=lambda p: p[1], reverse=False)
 
-def wire_shape(points, fit_equation, chlen = 1, cfcl = 1, distance=30):
+
+def fit_parabola_open_up(points_3d, min_sag=None):
+    """Fit z = ax^2 + bx + c in X-Z plane and force a to be non-negative."""
+    if len(points_3d) < 3:
+        return points_3d
+
+    xs = np.array([p[0] for p in points_3d], dtype=float)
+    ys = np.array([p[1] for p in points_3d], dtype=float)
+    zs = np.array([p[2] for p in points_3d], dtype=float)
+
+    x_span = float(np.ptp(xs))
+    if x_span < 1e-12:
+        return points_3d
+
+    z_span = float(np.ptp(zs))
+    if min_sag is None:
+        min_sag = max(0.05 * x_span, 0.25)
+
+    if z_span < 1e-9:
+        x_mid = float(0.5 * (xs.min() + xs.max()))
+        z_end = float(np.mean([zs[0], zs[-1]]))
+        sag = float(min_sag)
+        a = (4.0 * sag) / (x_span * x_span)
+        return [(float(x), float(ys[i]), float(a * (x - x_mid) ** 2 + (z_end - sag))) for i, x in enumerate(xs)]
+
+    a, b, c = np.polyfit(xs, zs, 2)
+    if a < 0:
+        x_vertex = -b / (2 * a)
+        z_vertex = float(np.polyval((a, b, c), x_vertex))
+        a = abs(a)
+        b = -2.0 * a * x_vertex
+        c = a * x_vertex * x_vertex + z_vertex
+
+    return [(float(x), float(ys[i]), float(a * x * x + b * x + c)) for i, x in enumerate(xs)]
+
+def wire_shape(points, fit_equation, chlen = 1/10, cfcl = 1, distance=30, anchor_origin=False, constrain_ends=False, camera_params=None):
+    # Image-space assumption: smaller y is farther away, larger y is closer.
+    # Process points explicitly from far pole to close pole.
     points = sort_points(points)
-    new = []
-    new.append((points[0][0], points[0][1], distance))
-    for i in(range(len(points) - 1)):
-        cfcl = characteristic_length(new, i,chlen, distance=30)
-        v= vector(points[i], points[i+1])
-        theta = np.arccos(np.sqrt((chlen*cfcl)**2 - v.mag()**2)/cfcl) if v.length < chlen else 0
-        #adding z to picture
-        z = new[-1][2] - chlen * np.cos(theta)
-        new.append((v.p2[0], v.p2[1], z))
-    display_vectors_3d(new, show_labels=False, show_points=False, title="Wire Shape 3D Visualization", show_2d_projection=True)
-    
+    if len(points) < 2:
+        return []
+
+    # Build one frame-rotation that maps the observed wire direction to +X.
+    dx0 = points[1][0] - points[0][0]
+    dy0 = points[1][1] - points[0][1]
+    if abs(dx0) < 1e-12 and abs(dy0) < 1e-12:
+        source_axis = vector((0, 0, 0), (0, 1, 0))
+    else:
+        source_axis = vector((0, 0, 0), (dx0, dy0, 0))
+    target_axis = vector((0, 0, 0), (1, 0, 0))
+    dcm = source_axis.convertspace(target_axis)
+
+    path = [(points[0][0], points[0][1], float(distance))]
+
+    for i in range(len(points) - 1):
+        cfcl = characteristic_length(path, len(path) - 1, chlen, distance)
+        v = vector((points[i][0], points[i][1], 0), (points[i + 1][0], points[i + 1][1], 0))
+
+        # Convert pixel displacement to meters using a depth-adjusted pixels-per-meter value.
+        meters_per_pixel = 1.0 / max(cfcl, 1e-9)
+        v = v * meters_per_pixel
+
+        v.dcm = dcm
+        step = v.v2vxbidcm()
+
+        prev = path[-1]
+        # Keep depth moving from far (distance) toward close pole (0).
+        next_z = prev[2] - abs(step[2])
+        path.append((prev[0] + step[0], prev[1] + step[1], next_z))
+
+    if fit_equation == "parabola_up":
+        # If camera model is provided, invert projection directly.
+        if camera_params is not None:
+            cam = sort_points(points)
+            u = np.array([p[0] for p in cam], dtype=float)
+            v = np.array([p[1] for p in cam], dtype=float)
+
+            pixels_per_meter = float(camera_params.get("pixels_per_meter", chlen))
+            tilt_deg = float(camera_params.get("tilt_deg", 35.0))
+            origin = camera_params.get("origin", (0.0, 0.0))
+            camera_height_m = float(camera_params.get("camera_height_m", 0.0))
+
+            tilt = math.radians(tilt_deg)
+            height_scale = 1.0 / (1.0 + max(camera_height_m, 0.0))
+            k = max(pixels_per_meter * height_scale, 1e-9)
+
+            x_vals = (u - float(origin[0])) / k
+            z_vals = (x_vals * math.sin(tilt) - (v - float(origin[1])) / k) / max(math.cos(tilt), 1e-9)
+            path = [(float(x_vals[i]), 0.0, float(z_vals[i])) for i in range(len(cam))]
+            path = fit_parabola_open_up(path)
+        else:
+            path = fit_parabola_open_up(path)
+
+    if anchor_origin and path:
+        x0, y0, z0 = path[0]
+        path = [(x - x0, y - y0, z - z0) for x, y, z in path]
+
+    if constrain_ends and len(path) > 1:
+        x_end = path[-1][0]
+        if abs(x_end) > 1e-9:
+            scale = float(distance) / float(x_end)
+            path = [(x * scale, y, z) for x, y, z in path]
+
+    return path
+
 
 
 
@@ -373,17 +511,17 @@ def calibrate_correction_factor(pi,pf,p0,chlen = 1, distance = 30):
     m1 = thestickyiesteststick.mag()
     cf = m0/m1
     return cf# in pixels per meter or pixels/1 meter so cf*1m = cf at [] pixels
-def characteristic_length(points,i,chlen, distance):
-    if i > 0:
-        z = points[i-1][2]/30
-        print(z)
-    else:
-        z = distance/30
-    if z == 0:
-        return chlen
-    cfcf = distance/z
-    print(cfcf)
-    return chlen*cfcf#pixels or pixels /1m ----> mult by mag of the vector in vector shape
+def characteristic_length(points,i,chlen, distance=30):
+    if not points:
+        return float(chlen)
+
+    z = abs(points[i][2]) if i < len(points) else abs(points[-1][2])
+    base_depth = max(abs(distance), 1e-9)
+
+    # Higher depth -> lower apparent size, so pixels-per-meter scales inversely with depth.
+    depth_scale = base_depth / max(z, 1e-9)
+    depth_scale = float(np.clip(depth_scale, 0.2, 5.0))
+    return float(chlen * depth_scale)
 
 
 
