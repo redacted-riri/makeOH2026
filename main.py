@@ -6,6 +6,16 @@ import cv2
 import numpy as np
 from pathlib import Path
 import matplotlib.pyplot as plt
+import tkinter as tk
+from datetime import datetime
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+try:
+    from PIL import Image, ImageTk
+except ImportError:
+    Image = None
+    ImageTk = None
 
 # good val for static reduction while catching 2-3m distance
 
@@ -27,17 +37,20 @@ class faultresponse():
                                 'flags': values["flags"], 'sag': values["sag"], 
                                 'temp':values["temp"] , 'm': None, "wind":values["wind"]
                     } 
-    def measure(self,measurements):
+    def measure(self, measurements):
             self.m = measurements
     def trip(self):
-                if self.m['flags'] > self.evalues['flags']:
+                if self.m is None:
+                    return None
+                if self.m['flags'] < self.evalues['flags']:
                     return self.etypes["flags"]
-                if measurements['sag'] > self.evalues['sag']:
+                if self.m['sag'] > self.evalues['sag']:
                     return self.etypes["sag"]
-                if measurements['temp'] > self.evalues['temp']:
+                if self.m['temp'] > self.evalues['temp']:
                     return self.etypes["temp"]
-                if measurements["wind"] > self.evalues['wind']:
+                if self.m["wind"] > self.evalues['wind']:
                     return self.etypes["wind"]
+                return None
     
     
     
@@ -213,9 +226,597 @@ def run_cam(
     cap.release()
     cv2.destroyAllWindows()
 
+
+class SagTrackerUI:
+    def __init__(self):
+        self.root = tk.Tk()
+        self.root.title("AEP Line Sag Tracker")
+        self.root.geometry("1000x700")
+
+        # Stored camera capture handle for the active camera module screen.
+        self.cap = None
+        self.current_frame = None
+        self.latest_points = []
+        self.photo = None
+        self.frame_count = 0
+
+        self.main_menu = tk.Frame(self.root)
+        self.camera_screen = tk.Frame(self.root)
+        self.register_screen = tk.Frame(self.root)
+        self.bug_report_screen = tk.Frame(self.root)
+        self.registered_camera_modules = []
+        self.bug_reports = []
+
+        self._build_main_menu()
+        self._build_camera_screen()
+        self._build_register_screen()
+        self._build_bug_report_screen()
+        self.show_main_menu()
+
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def _build_main_menu(self):
+        title = tk.Label(self.main_menu, text="Main Menu", font=("Segoe UI", 20, "bold"))
+        title.pack(pady=(20, 8))
+
+        subtitle = tk.Label(self.main_menu, text="Connected Modules", font=("Segoe UI", 13))
+        subtitle.pack(pady=(0, 10))
+
+        self.main_modules_list = tk.Listbox(self.main_menu, height=7, width=56, font=("Segoe UI", 11))
+        self.main_modules_list.pack(pady=(0, 16))
+
+        open_camera_btn = tk.Button(
+            self.main_menu,
+            text="Open Camera Module",
+            font=("Segoe UI", 12, "bold"),
+            padx=14,
+            pady=8,
+            command=self.show_camera_screen,
+        )
+        open_camera_btn.pack()
+
+        register_btn = tk.Button(
+            self.main_menu,
+            text="Register New Camera Module",
+            font=("Segoe UI", 11),
+            padx=12,
+            pady=6,
+            command=self.show_register_screen,
+        )
+        register_btn.pack(pady=(8, 0))
+
+        bug_btn = tk.Button(
+            self.main_menu,
+            text="Open Bug Reports",
+            font=("Segoe UI", 11),
+            padx=12,
+            pady=6,
+            command=self.show_bug_report_screen,
+        )
+        bug_btn.pack(pady=(8, 0))
+
+    def _build_camera_screen(self):
+        self.camera_screen.grid_rowconfigure(0, weight=3)
+        self.camera_screen.grid_rowconfigure(1, weight=2)
+        self.camera_screen.grid_columnconfigure(0, weight=3)
+        self.camera_screen.grid_columnconfigure(1, weight=2)
+
+        top_left = tk.LabelFrame(self.camera_screen, text="Live Camera", padx=8, pady=8)
+        top_left.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+
+        top_right = tk.LabelFrame(self.camera_screen, text="Controls / Module Switch", padx=8, pady=8)
+        top_right.grid(row=0, column=1, sticky="nsew", padx=8, pady=8)
+
+        bottom_left = tk.LabelFrame(self.camera_screen, text="X-Z Plot", padx=8, pady=8)
+        bottom_left.grid(row=1, column=0, sticky="nsew", padx=8, pady=8)
+
+        bottom_right = tk.LabelFrame(self.camera_screen, text="Print / Errors", padx=8, pady=8)
+        bottom_right.grid(row=1, column=1, sticky="nsew", padx=8, pady=8)
+
+        self.video_label = tk.Label(top_left, text="Camera feed appears here", bg="#111", fg="white")
+        self.video_label.pack(fill="both", expand=True)
+
+        self.status_label = tk.Label(top_right, text="Camera idle", font=("Segoe UI", 11), anchor="w")
+        self.status_label.pack(fill="x", pady=(0, 8))
+
+        module_subtitle = tk.Label(top_right, text="Connected Modules", font=("Segoe UI", 10, "bold"), anchor="w")
+        module_subtitle.pack(fill="x", pady=(0, 4))
+
+        self.camera_module_list = tk.Listbox(top_right, height=3, font=("Segoe UI", 10))
+        self.camera_module_list.selection_set(0)
+        self.camera_module_list.pack(fill="x", pady=(0, 6))
+        self.camera_module_list.bind("<Double-Button-1>", lambda _evt: self.open_selected_module())
+
+        tk.Button(top_right, text="Open Selected Module", command=self.open_selected_module).pack(fill="x", pady=3)
+        tk.Button(top_right, text="Register New Camera Module", command=self.show_register_screen).pack(fill="x", pady=3)
+        tk.Button(top_right, text="Open Bug Reports", command=self.show_bug_report_screen).pack(fill="x", pady=3)
+        tk.Button(top_right, text="Start Camera", command=self.start_camera).pack(fill="x", pady=3)
+        tk.Button(top_right, text="Stop Camera", command=self.stop_camera).pack(fill="x", pady=3)
+        tk.Button(top_right, text="Save Compare PNG", command=self.save_compare_from_latest).pack(fill="x", pady=3)
+        tk.Button(top_right, text="Back to Menu", command=self.show_main_menu).pack(fill="x", pady=3)
+
+        self.error_module_frame = tk.Frame(top_right, bg="#6b0000", highlightthickness=2, highlightbackground="#ff3b30")
+        self.error_module_title = tk.Label(
+            self.error_module_frame,
+            text="⚠️🌋 WARNING CAMERA MODULE 🌋⚠️",
+            bg="#6b0000",
+            fg="#ffe28a",
+            font=("Segoe UI", 11, "bold"),
+        )
+        self.error_module_title.pack(fill="x", padx=8, pady=(6, 2))
+
+        self.error_module_desc = tk.Label(
+            self.error_module_frame,
+            text=(
+                "Fault visualizer armed.\n"
+                "Hazard mode overlays warning status and escalation notes.\n"
+                "Use this module to inspect tripped thresholds immediately."
+            ),
+            justify="left",
+            bg="#6b0000",
+            fg="#ffd7d1",
+            font=("Segoe UI", 9),
+        )
+        self.error_module_desc.pack(fill="x", padx=8, pady=(0, 8))
+
+        self.plot_figure = Figure(figsize=(5, 3), dpi=100)
+        self.plot_ax = self.plot_figure.add_subplot(111)
+        self.plot_ax.set_title("Waiting for 3+ points")
+        self.plot_ax.set_xlabel("x (m)")
+        self.plot_ax.set_ylabel("z (m)")
+        self.plot_ax.grid(True, alpha=0.3)
+        self.plot_canvas = FigureCanvasTkAgg(self.plot_figure, master=bottom_left)
+        self.plot_canvas.get_tk_widget().pack(fill="both", expand=True)
+        self.plot_canvas.draw()
+
+        self.log_text = tk.Text(bottom_right, height=12, wrap="word")
+        self.log_text.pack(fill="both", expand=True)
+        self.log("Camera module initialized")
+
+        self.refresh_module_lists()
+
+    def _build_register_screen(self):
+        title = tk.Label(self.register_screen, text="Register New Camera Module", font=("Segoe UI", 18, "bold"))
+        title.pack(pady=(20, 8))
+
+        sub = tk.Label(
+            self.register_screen,
+            text="Enter camera location information and serial number.",
+            font=("Segoe UI", 11),
+        )
+        sub.pack(pady=(0, 14))
+
+        form = tk.Frame(self.register_screen)
+        form.pack(pady=8)
+
+        tk.Label(form, text="Location Info", font=("Segoe UI", 10, "bold"), anchor="w", width=18).grid(row=0, column=0, padx=6, pady=6, sticky="w")
+        self.location_entry = tk.Entry(form, width=44, font=("Segoe UI", 10))
+        self.location_entry.grid(row=0, column=1, padx=6, pady=6)
+
+        tk.Label(form, text="Serial Number", font=("Segoe UI", 10, "bold"), anchor="w", width=18).grid(row=1, column=0, padx=6, pady=6, sticky="w")
+        self.serial_entry = tk.Entry(form, width=44, font=("Segoe UI", 10))
+        self.serial_entry.grid(row=1, column=1, padx=6, pady=6)
+
+        self.register_status_label = tk.Label(self.register_screen, text="", font=("Segoe UI", 10), fg="#2e7d32")
+        self.register_status_label.pack(pady=(8, 8))
+
+        actions = tk.Frame(self.register_screen)
+        actions.pack(pady=6)
+        tk.Button(actions, text="Save Module", command=self.save_registered_module, padx=12, pady=6).pack(side="left", padx=6)
+        tk.Button(actions, text="Back to Main Menu", command=self.show_main_menu, padx=12, pady=6).pack(side="left", padx=6)
+
+        self.register_list = tk.Listbox(self.register_screen, height=8, width=78, font=("Consolas", 10))
+        self.register_list.pack(pady=(10, 14))
+
+    def _build_bug_report_screen(self):
+        title = tk.Label(self.bug_report_screen, text="Bug Reports", font=("Segoe UI", 18, "bold"))
+        title.pack(pady=(20, 8))
+
+        sub = tk.Label(
+            self.bug_report_screen,
+            text="Submit field bug reports with module metadata and operator details.",
+            font=("Segoe UI", 11),
+        )
+        sub.pack(pady=(0, 12))
+
+        form = tk.Frame(self.bug_report_screen)
+        form.pack(pady=6)
+
+        tk.Label(form, text="Location Info", font=("Segoe UI", 10, "bold"), width=16, anchor="w").grid(row=0, column=0, padx=6, pady=5, sticky="w")
+        self.bug_location_entry = tk.Entry(form, width=42, font=("Segoe UI", 10))
+        self.bug_location_entry.grid(row=0, column=1, padx=6, pady=5)
+
+        tk.Label(form, text="Serial Number", font=("Segoe UI", 10, "bold"), width=16, anchor="w").grid(row=1, column=0, padx=6, pady=5, sticky="w")
+        self.bug_serial_entry = tk.Entry(form, width=42, font=("Segoe UI", 10))
+        self.bug_serial_entry.grid(row=1, column=1, padx=6, pady=5)
+
+        tk.Label(form, text="Operator", font=("Segoe UI", 10, "bold"), width=16, anchor="w").grid(row=2, column=0, padx=6, pady=5, sticky="w")
+        self.bug_operator_entry = tk.Entry(form, width=42, font=("Segoe UI", 10))
+        self.bug_operator_entry.grid(row=2, column=1, padx=6, pady=5)
+
+        tk.Label(form, text="Severity", font=("Segoe UI", 10, "bold"), width=16, anchor="w").grid(row=3, column=0, padx=6, pady=5, sticky="w")
+        self.bug_severity_var = tk.StringVar(value="Medium")
+        severity_menu = tk.OptionMenu(form, self.bug_severity_var, "Low", "Medium", "High", "Critical")
+        severity_menu.config(width=39)
+        severity_menu.grid(row=3, column=1, padx=6, pady=5, sticky="w")
+
+        tk.Label(form, text="Module", font=("Segoe UI", 10, "bold"), width=16, anchor="w").grid(row=4, column=0, padx=6, pady=5, sticky="w")
+        self.bug_module_var = tk.StringVar(value="Camera Capture Module")
+        module_menu = tk.OptionMenu(
+            form,
+            self.bug_module_var,
+            "Camera Capture Module",
+            "Error Camera Module",
+            "Registered Camera Module",
+            "UI / Navigation",
+            "Other",
+        )
+        module_menu.config(width=39)
+        module_menu.grid(row=4, column=1, padx=6, pady=5, sticky="w")
+
+        tk.Label(form, text="Description", font=("Segoe UI", 10, "bold"), width=16, anchor="nw").grid(row=5, column=0, padx=6, pady=5, sticky="nw")
+        self.bug_description_text = tk.Text(form, width=44, height=5, font=("Segoe UI", 10), wrap="word")
+        self.bug_description_text.grid(row=5, column=1, padx=6, pady=5)
+
+        self.bug_status_label = tk.Label(self.bug_report_screen, text="", font=("Segoe UI", 10))
+        self.bug_status_label.pack(pady=(8, 6))
+
+        controls = tk.Frame(self.bug_report_screen)
+        controls.pack(pady=4)
+        tk.Button(controls, text="Save Bug Report", command=self.save_bug_report, padx=12, pady=6).pack(side="left", padx=6)
+        tk.Button(controls, text="Back to Main Menu", command=self.show_main_menu, padx=12, pady=6).pack(side="left", padx=6)
+
+        self.bug_reports_list = tk.Listbox(self.bug_report_screen, height=10, width=110, font=("Consolas", 9))
+        self.bug_reports_list.pack(pady=(10, 14))
+        self.refresh_bug_reports_list()
+
+    def refresh_module_lists(self):
+        base_main = [
+            "Camera Capture Module",
+            "Error Camera Module (activates on faults)",
+        ]
+        base_camera = [
+            "Camera Capture Module",
+            "Error Camera Module",
+        ]
+
+        if hasattr(self, "main_modules_list"):
+            self.main_modules_list.delete(0, tk.END)
+            for item in base_main:
+                self.main_modules_list.insert(tk.END, item)
+            for module in self.registered_camera_modules:
+                self.main_modules_list.insert(
+                    tk.END,
+                    f"Registered Camera | {module['location']} | SN {module['serial']}",
+                )
+
+        if hasattr(self, "camera_module_list"):
+            self.camera_module_list.delete(0, tk.END)
+            for item in base_camera:
+                self.camera_module_list.insert(tk.END, item)
+            for module in self.registered_camera_modules:
+                self.camera_module_list.insert(
+                    tk.END,
+                    f"Registered Camera [{module['serial']}]",
+                )
+            if self.camera_module_list.size() > 0:
+                self.camera_module_list.selection_clear(0, tk.END)
+                self.camera_module_list.selection_set(0)
+
+        if hasattr(self, "register_list"):
+            self.register_list.delete(0, tk.END)
+            if not self.registered_camera_modules:
+                self.register_list.insert(tk.END, "No registered camera modules yet.")
+            else:
+                for idx, module in enumerate(self.registered_camera_modules, start=1):
+                    self.register_list.insert(
+                        tk.END,
+                        f"{idx}. Location: {module['location']} | Serial: {module['serial']}",
+                    )
+
+    def refresh_bug_reports_list(self):
+        if not hasattr(self, "bug_reports_list"):
+            return
+
+        self.bug_reports_list.delete(0, tk.END)
+        if not self.bug_reports:
+            self.bug_reports_list.insert(tk.END, "No bug reports submitted yet.")
+            return
+
+        for idx, r in enumerate(self.bug_reports, start=1):
+            self.bug_reports_list.insert(
+                tk.END,
+                (
+                    f"{idx}. [{r['submitted_at']}] [{r['severity']}] [{r['status']}] "
+                    f"module={r['module']} | location={r['location']} | serial={r['serial']} | "
+                    f"operator={r['operator']} | desc={r['description']}"
+                ),
+            )
+
+    def show_register_screen(self):
+        self.stop_camera()
+        self.main_menu.pack_forget()
+        self.camera_screen.pack_forget()
+        self.bug_report_screen.pack_forget()
+        self.register_screen.pack(fill="both", expand=True)
+        self.refresh_module_lists()
+
+    def show_bug_report_screen(self):
+        self.stop_camera()
+        self.main_menu.pack_forget()
+        self.camera_screen.pack_forget()
+        self.register_screen.pack_forget()
+        self.bug_report_screen.pack(fill="both", expand=True)
+        self.refresh_bug_reports_list()
+
+    def save_registered_module(self):
+        location = self.location_entry.get().strip()
+        serial = self.serial_entry.get().strip()
+
+        if not location or not serial:
+            self.register_status_label.config(text="Please enter both location info and serial number.", fg="#c62828")
+            return
+
+        self.registered_camera_modules.append({"location": location, "serial": serial})
+        self.location_entry.delete(0, tk.END)
+        self.serial_entry.delete(0, tk.END)
+        self.register_status_label.config(text="Camera module registered successfully.", fg="#2e7d32")
+        self.refresh_module_lists()
+        if hasattr(self, "log_text"):
+            self.log(f"Registered camera module | location={location} | serial={serial}")
+
+    def save_bug_report(self):
+        location = self.bug_location_entry.get().strip()
+        serial = self.bug_serial_entry.get().strip()
+        operator = self.bug_operator_entry.get().strip()
+        severity = self.bug_severity_var.get().strip()
+        module = self.bug_module_var.get().strip()
+        description = self.bug_description_text.get("1.0", tk.END).strip()
+
+        if not location or not serial or not operator or not description:
+            self.bug_status_label.config(
+                text="Please complete location, serial, operator, and description.",
+                fg="#c62828",
+            )
+            return
+
+        report = {
+            "location": location,
+            "serial": serial,
+            "operator": operator,
+            "severity": severity,
+            "module": module,
+            "description": description,
+            "submitted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "status": "Open",
+        }
+        self.bug_reports.append(report)
+        self.refresh_bug_reports_list()
+
+        self.bug_location_entry.delete(0, tk.END)
+        self.bug_serial_entry.delete(0, tk.END)
+        self.bug_operator_entry.delete(0, tk.END)
+        self.bug_description_text.delete("1.0", tk.END)
+        self.bug_severity_var.set("Medium")
+        self.bug_module_var.set("Camera Capture Module")
+
+        self.bug_status_label.config(text="Bug report saved.", fg="#2e7d32")
+        if hasattr(self, "log_text"):
+            self.log(
+                f"Bug report saved | severity={severity} | module={module} | serial={serial} | operator={operator}"
+            )
+
+    def show_main_menu(self):
+        self.stop_camera()
+        self.bug_report_screen.pack_forget()
+        self.register_screen.pack_forget()
+        self.camera_screen.pack_forget()
+        self.main_menu.pack(fill="both", expand=True)
+        self.refresh_module_lists()
+
+    def show_camera_screen(self):
+        self.main_menu.pack_forget()
+        self.register_screen.pack_forget()
+        self.camera_screen.pack(fill="both", expand=True)
+        self.start_camera()
+
+    def show_error_module_card(self, reason):
+        self.error_module_desc.config(
+            text=(
+                "⚠️ Fault detected. Escalating to warning camera module.\n"
+                f"Trip reason: {reason}\n"
+                "Status: RED ALERT / High-visibility monitoring enabled."
+            )
+        )
+        if not self.error_module_frame.winfo_ismapped():
+            self.error_module_frame.pack(fill="x", pady=(8, 0))
+
+    def hide_error_module_card(self):
+        if self.error_module_frame.winfo_ismapped():
+            self.error_module_frame.pack_forget()
+
+    def open_selected_module(self):
+        selected = self.camera_module_list.curselection()
+        if not selected:
+            self.log("No module selected")
+            return
+
+        module_name = self.camera_module_list.get(selected[0])
+        if module_name == "Camera Capture Module":
+            self.log("Camera Capture Module selected")
+            self.start_camera()
+        elif module_name == "Error Camera Module":
+            self.log("Error Camera Module selected")
+            self.open_error_module()
+        elif module_name.startswith("Registered Camera"):
+            self.log(f"{module_name} selected")
+            self.status_label.config(text=f"{module_name} selected")
+            self.start_camera()
+
+    def log(self, msg):
+        self.log_text.insert(tk.END, msg + "\n")
+        self.log_text.see(tk.END)
+
+    def start_camera(self):
+        if self.cap is not None:
+            self.log("Camera already running")
+            return
+
+        cap = cv2.VideoCapture(1)
+        if not cap.isOpened():
+            cap = cv2.VideoCapture(0)
+
+        if not cap.isOpened():
+            self.status_label.config(text="Camera error: unable to open camera")
+            self.log("Error: unable to open camera at index 1 or 0")
+            return
+
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+
+        self.cap = cap
+        self.frame_count = 0
+        self.status_label.config(text="Camera running")
+        self.log("Camera started")
+        self._update_camera_frame()
+
+    def stop_camera(self):
+        if self.cap is not None:
+            self.cap.release()
+            self.cap = None
+            self.log("Camera stopped")
+        self.status_label.config(text="Camera stopped")
+
+    def _update_camera_frame(self):
+        if self.cap is None:
+            return
+
+        ok, frame = self.cap.read()
+        if not ok:
+            self.status_label.config(text="Camera error: failed to grab frame")
+            self.log("Error: failed to grab frame")
+            self.stop_camera()
+            return
+
+        processed_frame, _, points = flag_detection(frame)
+        self.latest_points = points
+        self.frame_count += 1
+
+        label = f"Flagged Markers: {len(points)}"
+        cv2.putText(
+            processed_frame,
+            label,
+            (20, 40),
+            cv2.FONT_HERSHEY_DUPLEX,
+            1.1,
+            (140, 238, 255),
+            2,
+        )
+
+        if Image is None or ImageTk is None:
+            self.status_label.config(text="Install Pillow for UI video: pip install pillow")
+            self.log("Error: Pillow missing")
+            self.stop_camera()
+            return
+
+        rgb = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
+        img = Image.fromarray(rgb)
+        img = img.resize((960, 540))
+        self.photo = ImageTk.PhotoImage(image=img)
+        self.video_label.configure(image=self.photo, text="")
+
+        if self.frame_count % 5 == 0:
+            self.update_xz_plot(points)
+
+        self.root.after(20, self._update_camera_frame)
+
+    def update_xz_plot(self, points):
+        self.plot_ax.clear()
+        self.plot_ax.set_xlabel("x (m)")
+        self.plot_ax.set_ylabel("z (m)")
+        self.plot_ax.grid(True, alpha=0.3)
+
+        if len(points) < 3:
+            self.plot_ax.set_title("Need at least 3 points for reconstruction")
+            self.plot_canvas.draw()
+            return
+
+        try:
+            est = reconstruct_from_measured_points(points, span=100.0, camera_height_m=1.0)
+            rec = np.array(est["reconstructed_points"], dtype=float)
+            rx = rec[:, 0]
+            rz = rec[:, 2]
+
+            fit = est["fitted_parabola"]
+            a = float(fit["a"])
+            b = float(fit["b"])
+            c = float(fit["c"])
+            x_dense = np.linspace(float(rx.min()), float(rx.max()), 300)
+            z_dense = a * x_dense * x_dense + b * x_dense + c
+
+            self.plot_ax.scatter(rx, rz, s=22, color="tab:blue", label="Reconstructed points")
+            self.plot_ax.plot(x_dense, z_dense, color="tab:orange", linewidth=2.0, label="Estimated parabola")
+            self.plot_ax.set_title("X-Z Reconstructed Curve")
+            self.plot_ax.legend(loc="best")
+        except Exception as exc:
+            self.plot_ax.set_title("X-Z plot update failed")
+            self.log(f"Plot update error: {exc}")
+
+        self.plot_canvas.draw()
+
+    def save_compare_from_latest(self):
+        if len(self.latest_points) < 3:
+            self.status_label.config(text="Need at least 3 detected points to save compare PNG")
+            self.log("Save compare skipped: need at least 3 points")
+            return
+
+        out = save_original_vs_estimated_png(
+            self.latest_points,
+            original_sag_m=2.0,
+            span_m=100.0,
+            camera_height_m=1.0,
+            output_png="benchmark_outputs/original_vs_estimated_parabola.png",
+        )
+        self.status_label.config(text=f"Saved: {out}")
+        self.log(f"Saved comparison PNG: {out}")
+
+    def open_error_module(self):
+        sag_est = 0.0
+        if len(self.latest_points) >= 3:
+            try:
+                est = reconstruct_from_measured_points(self.latest_points, span=100.0, camera_height_m=1.0)
+                sag_est = float(est.get("estimated_sag_m", 0.0))
+            except Exception as exc:
+                self.log(f"Error module: failed to estimate sag ({exc})")
+
+        checker = faultresponse(values={"flags": 3, "sag": 5.0, "temp": 50, "m": None, "wind": 40})
+        checker.measure({
+            "flags": len(self.latest_points),
+            "sag": sag_est,
+            "temp": 30,
+            "wind": 20,
+        })
+        tripped = checker.trip()
+
+        if tripped is not None:
+            self.log(f"Error tripped: {tripped}")
+            self.status_label.config(text=f"Error tripped: {tripped}")
+            self.show_error_module_card(tripped)
+        else:
+            self.log("No errors")
+            self.status_label.config(text="No errors")
+            self.hide_error_module_card()
+
+    def on_close(self):
+        self.stop_camera()
+        self.root.destroy()
+
+    def run(self):
+        self.root.mainloop()
+
 def main():
-    print("Starting AEPrototype..")
-    run_cam(live=True, save_compare_png=False)
+    app = SagTrackerUI()
+    app.run()
 
 if __name__ == "__main__":
     main()
