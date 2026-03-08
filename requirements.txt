@@ -1,0 +1,5 @@
+numpy
+opencv-python
+adafruit-blinka
+adafruit-circuitpython-si7021
+matplotlib
