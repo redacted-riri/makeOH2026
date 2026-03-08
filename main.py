@@ -55,7 +55,9 @@ def run_cam():
     cv.destroyAllWindows()
 
 def detect_flags(frame):
-        contours, hierarchy = cv2.findContours(frame, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        # If you have a BGR image
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        contours, hierarchy = cv2.findContours(gray, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
         flags = []
         for i in range(len(contours)):
             a = contours[i]
