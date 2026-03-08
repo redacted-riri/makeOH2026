@@ -1,93 +1,110 @@
-from cam import *
-#from temp import *
+### work on acuracy for mid-point noting on flagged [bounded] rectangles ###
+### work on active condensing for multiple flags around shadows for the same marker ###
+
+import cv2
 import numpy as np
-import cv2 as cv
-from datetime import datetime
 
-def find_black(frame):
-    #im = cv.imread('test4.png')
-    #assert im is not None, "file could not be read"
+# good val for static reduction while catching 2-3m distance
 
-    imgray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
-    # detect dark pixels (0–50)
-    mask = cv.inRange(imgray, 0, 50)
-    black_pixels = cv.countNonZero(mask)
+minimum_flagged_area = 100
 
-    return black_pixels
+# ranges for yellow detection
+
+upper_bound_yellow = np.array([30, 255, 255])  # don't change
+lower_bound_yellow = np.array([20, 100, 100])  # alter as needed : currently flags glazed chair wood (darker orangish) ~hex aa632b 965511 a5632f
+
+
+def flag_detection(frame):
+
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, lower_bound_yellow, upper_bound_yellow)
+    kernel = np.ones((3,3), np.uint8)
+
+
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel) # remov minimal static / false pos
+
+    mask = cv2.dilate(mask, kernel, iterations=1) # thicken markers : fill gaps : join tears 
+
+
+
+    contours, hierarchy = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    flag_cords = [] 
+    
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        
+        if area > minimum_flagged_area:
+
+            x, y, w, h = cv2.boundingRect(contour)
+
+            centr = (x + w // 2, y + h // 2) # center @ midpoint (x,y) of l & w of bounding box
+
+            flag_cords.append(centr)
+            
+            # draw bounding box / center dot
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (20, 255, 57), 2)
+            cv2.circle(frame, centr, 4, (63, 0, 255), -1) 
+
+    return frame, mask, flag_cords
+
 
 def run_cam():
-    cap = cv.VideoCapture(0)
 
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # try to grab the external webcam feed (i=0)
+    cap = cv2.VideoCapture(1)
 
     if not cap.isOpened():
-        print("Could not open camera")
-        return
+        print("⚠️ Error: Could not open external webcam (index 1) - Trying main camera (index 0)") # will also occur if xtrnal cam is in use
+        cap = cv2.VideoCapture(0) # fallback to default cam
 
-    target_fps = 15
-    frame_time = 1 / target_fps
+    # force proper resolution render, may need to rm 64/65 on pi
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)  
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)  
+
+    print("✅ Camera Active - Tracking Yellow Markers")
+    print("(to quit type 'x' with the feedback window selected)")
 
     while True:
-        start = time.time()
-
         ret, frame = cap.read()
         if not ret:
-            print("Failed to grab frame")
+            print("⚠️ Error: Failed to grab frame")
             break
 
-        #black_count = find_black(frame)
-        #cv.putText(frame, f"Black: {black_count}", (20,40), cv.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 2)
-
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        cv.putText(frame, f"Time: {timestamp}", (20,80), cv.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 2)
-
-        #print(f"{timestamp}")# | Black pixels: {black_count}")
-        frame = detect_flags(frame)
-        cv.imshow("Camera", frame)
-        if cv.waitKey(1) & 0xFF == ord('q'):
-            break
+        processed_frame, mask, points = flag_detection(frame)
         
-        elapsed = time.time() - start
-        sleep_time = frame_time - elapsed
-        if sleep_time > 0:
-            time.sleep(sleep_time)
+        # sort points logged by X values (L -> R)
+        points.sort(key=lambda p: p[0])
+
+        # draw label on view window
+        text = f"Flagged Markers: {len(points)}"
+        font = cv2.FONT_HERSHEY_DUPLEX
+        scale = 1.2
+        thickness = 2
+
+        (text_w, text_h), _ = cv2.getTextSize(text, font, scale, thickness)
+        
+        cv2.putText(
+            processed_frame,
+            text,
+            (20, 25 + text_h//2),
+            font,
+            scale,
+            (140, 238, 255),
+            thickness
+        )
+        
+        # display window headers
+        cv2.imshow("AEP Line Sag Tracker", processed_frame)
+        cv2.imshow("Detection Key | White = Yellow", mask)
+        if cv2.waitKey(1) & 0xFF == ord('x'):
+            break
+
     cap.release()
-    cv.destroyAllWindows()
-
-def detect_flags(frame):
-        # If you have a BGR image
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        contours, hierarchy = cv2.findContours(gray, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-        flags = []
-        for i in range(len(contours)):
-            a = contours[i]
-            x, y, w, h = cv2.boundingRect(a)
-            cen = (x + w // 2, y + h // 2)
-            if yellowfuck(cen, frame): #r > 150 and g > 150 and b < 100
-                flags.append(a)
-
-        for contour in flags:
-            epsilon = 0.02 * cv2.arcLength(contour, True)
-            approx = cv2.approxPolyDP(contour, epsilon, True)
-            
-            # Yellow = (0, 255, 255) in BGR
-            cv2.drawContours(frame, [approx], -1, (0, 255, 255), 2)
-
-        return frame
-def yellowfuck(point, frame):
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-
-    lower_yellow = np.array([20, 100, 100])
-    upper_yellow = np.array([30, 255, 255])
-
-    mask = cv2.inRange(hsv, lower_yellow, upper_yellow)
-    # mask[y, x] > 0 means that pixel is yellow
-    if mask[point[1], point[0]] > 0:
-        return True
-    return False
+    cv2.destroyAllWindows()
 
 def main():
-    print("Hello World")
+    print("Starting AEPrototype..")
     run_cam()
 
 if __name__ == "__main__":
