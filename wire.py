@@ -8,12 +8,14 @@ except ImportError:
     plt = None
 
 def calculate_vector(p1, p2):
-    """Calculate vector from p1 to p2"""
-    return (p2[0] - p1[0], p2[1] - p1[1])
+    """Calculate vector from p1 to p2 for 2D/3D tuples."""
+    if len(p1) != len(p2):
+        raise ValueError("Points must have the same dimension")
+    return tuple(p2[i] - p1[i] for i in range(len(p1)))
 
 def calculate_length(vector):
-    """Calculate length/magnitude of a vector"""
-    return math.sqrt(vector[0]**2 + vector[1]**2)
+    """Calculate vector magnitude for any dimension."""
+    return math.sqrt(sum(component ** 2 for component in vector))
 
 def calculate_angle(vector):
     """Calculate angle of vector in degrees (from positive x-axis)"""
@@ -281,27 +283,114 @@ class vector:
         self.length = self.lengthp * self.correctionfactor
         self.angle = calculate_angle(self.vector)
         self.chlen = 1 #meters
+    def __add__(self, other):
+        if isinstance(other, vector):
+            if np.size(self.vector) != np.size(other.vector):
+                raise ValueError("Vectors must be of the same dimension to add")
+            else:
+                new_vector = tuple(self.vector[i] + other.vector[i] for i in range(len(self.vector)))
+                origin = tuple(0 for _ in range(len(new_vector)))
+                return vector(origin, new_vector)
+        else:
+            raise ValueError("Can only add another vector")
+    def mag(self):
+        a = 0
+        for i in range(len(self.vector)):
+            a += self.vector[i]**2
+        return math.sqrt(a)
+    import numpy as np
+
+    def convertspace(self, newspace, type1 = "cartesian", type2 = "cartesian"):
+        if type(newspace) != vector:
+            raise ValueError("New space must be a vector")
+        if np.size(self.vector) != 3:
+            raise ValueError("please use size 3")
+        if np.size(newspace.vector) != 3:
+            raise ValueError("please use size 3")
+        if type1 == "cylindrical":
+            raise NotImplementedError("Cylindrical coordinates not implemented yet")
+        if type1 == "spherical":
+            raise NotImplementedError("Spherical coordinates not implemented yet")
+        if type2 == "cylindrical":
+            raise NotImplementedError("Cylindrical coordinates not implemented yet")
+        if type2 == "spherical":
+            raise NotImplementedError("Spherical coordinates not implemented yet")
+        if type1 == "cartesian" and type2 == "cartesian":
+                """Get DCM that rotates vector v to vector vx."""
+                vx = newspace.vector  / np.linalg.norm(np.array(newspace.vector))
+                v =self.vector / np.linalg.norm(np.array(self.vector))
+                
+                axis  = np.cross(v, vx)
+                angle = np.arccos(np.clip(np.dot(v, vx), -1, 1))
+                
+                # Rodrigues' rotation formula
+                K = np.array([[0, -axis[2], axis[1]],
+                            [axis[2], 0, -axis[0]],
+                            [-axis[1], axis[0], 0]])
+                
+                dcm = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * K @ K
+                self.dcm = dcm
+                return self.dcm        
+    def v2vxbidcm(self):
+        directioncosmat = self.dcm
+        v = list(self.vector)
+        self.vector = directioncosmat*v
+
+    
+        
 
 def sort_points(points):
     #sort points by y value hight o low
     return sorted(points, key=lambda p: p[1], reverse=True)
 
-def wire_shape(points, fit_equation, chlen, distance):
+def wire_shape(points, fit_equation, chlen = 1, cfcl = 1, distance=30):
     points = sort_points(points)
     new = []
     new.append((points[0][0], points[0][1], distance))
     for i in(range(len(points) - 1)):
+        cfcl = characteristic_length(new, i,chlen, distance=30)
         v= vector(points[i], points[i+1])
-        theta = np.arccos(np.sqrt(chlen**2 - v.length**2)/chlen) if v.length < chlen else 0
+        theta = np.arccos(np.sqrt((chlen*cfcl)**2 - v.mag()**2)/cfcl) if v.length < chlen else 0
         #adding z to picture
         z = new[-1][2] - chlen * np.cos(theta)
         new.append((v.p2[0], v.p2[1], z))
     display_vectors_3d(new, show_labels=False, show_points=False, title="Wire Shape 3D Visualization", show_2d_projection=True)
     
 
-    
 
 
+def calibrate_correction_factor(pi,pf,p0,chlen = 1, distance = 30):
+    # calibrates the script to detect the wire at correct length. ouput in pixels per meter
+    thestickyiesteststick = vector(pi, pf, distance)
+    #thestickyiesteststick = vector.convertspace()
+    pole = vector((0, 0, -1), (distance, 0, 0))
+    polep = vector((0,0,0), (pole.mag(),p0[0]/10000,p0[1]/10000))
+    dcmc2g = polep.convertspace(pole)
+    polep.v2vxbidcm(dcmc2g)
+    #now take the vector and conver to pixels/m
+    m0 = thestickyiesteststick.mag()
+    thestickyiesteststick.v2vxbidcm(dcmc2g)
+    m1 = thestickyiesteststick.mag()
+    cf = m0/m1
+    return cf# in pixels per meter or pixels/1 meter so cf*1m = cf at [] pixels
+def characteristic_length(points,i,chlen, distance):
+    if i > 0:
+        z = points[i-1][2]/30
+        print(z)
+    else:
+        z = distance/30
+    if z == 0:
+        return chlen
+    cfcf = distance/z
+    print(cfcf)
+    return chlen*cfcf#pixels or pixels /1m ----> mult by mag of the vector in vector shape
+
+
+
+
+
+
+'''
 # Example usage / Demo
 if __name__ == "__main__":
     # Create a blank image
@@ -370,5 +459,5 @@ if __name__ == "__main__":
             a3d = angle_between_vectors_3d(vectors_3d[i]["vector"], vectors_3d[i + 1]["vector"])
             print(f"Angle between 3D Vector {i+1} and {i+2}: {a3d:.2f}°")
     except ImportError as exc:
-        print(f"3D display skipped: {exc}")
+        print(f"3D display skipped: {exc}")'''
 
