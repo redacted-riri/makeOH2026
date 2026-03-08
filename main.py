@@ -15,7 +15,32 @@ minimum_flagged_area = 100
 
 upper_bound_yellow = np.array([30, 255, 255])  # don't change
 lower_bound_yellow = np.array([20, 100, 100])  # alter as needed : currently flags glazed chair wood (darker orangish) ~hex aa632b 965511 a5632f
+class faultresponse():
 
+    def __init__(self, values = {'flags': 10, 'sag': .05, 
+                                'temp':50 , 'm': None, "wind":40}):
+                    self.etypes = {
+                                'flags': "cant detect flags requires maintenance", 'sag': "sag too much in danger", 
+                                'temp': "temperature too high", 'm': "maintenance required", "wind": "WIND TOO HIGH"
+                    }
+                    self.evalues =  {
+                                'flags': values["flags"], 'sag': values["sag"], 
+                                'temp':values["temp"] , 'm': None, "wind":values["wind"]
+                    } 
+    def measure(self,measurements):
+            self.m = measurements
+    def trip(self):
+                if self.m['flags'] > self.evalues['flags']:
+                    return self.etypes["flags"]
+                if measurements['sag'] > self.evalues['sag']:
+                    return self.etypes["sag"]
+                if measurements['temp'] > self.evalues['temp']:
+                    return self.etypes["temp"]
+                if measurements["wind"] > self.evalues['wind']:
+                    return self.etypes["wind"]
+    
+    
+    
 
 def save_original_vs_estimated_png(
     measured_points,
@@ -138,6 +163,7 @@ def run_cam(
         if live == True and len(points) >= 3:
             frompoints = reconstruct_from_measured_points(points, span=100, camera_height_m=1)
             a = plot_xz_points_with_parabola(frompoints)######this is the live plotting you need
+            
 
         if save_compare_png and (not saved_once) and len(points) >= 3:
             out = save_original_vs_estimated_png(
@@ -149,6 +175,14 @@ def run_cam(
             )
             print(f"Saved comparison PNG: {out}")
             saved_once = True
+        
+        if live == True:
+            e = faultresponse()
+            e.measure({
+                                'flags': 30, 'sag': 5, 
+                                'temp': 30, "wind": 20
+                    })
+            e.trip()
         # sort points logged by X values (L -> R)
         points.sort(key=lambda p: p[0])
 
@@ -181,7 +215,7 @@ def run_cam(
 
 def main():
     print("Starting AEPrototype..")
-    run_cam(live=True, save_compare_png=False, show_comparison=False)
+    run_cam(live=True, save_compare_png=False)
 
 if __name__ == "__main__":
     main()
