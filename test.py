@@ -1,5 +1,6 @@
 from pathlib import Path
 import csv
+import math
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -11,6 +12,208 @@ from testshape import (
     verify_reconstruction,
 )
 from wire import wire_shape
+
+
+def reconstruct_from_measured_points(
+    measured_points,
+    span = 100,
+    tilt_deg=30,
+    camera_height_m=1.0,
+    origin=(120.0, 260.0),
+    pixels_per_meter=None,
+    fit_equation="parabola_up",
+    anchor_origin=True,
+    constrain_ends=True,
+):
+    """
+    Reconstruct a wire/parabola from measured image points only (no reference parabola required).
+
+    Args:
+        measured_points: list of (u, v) image-space points.
+        span: physical pole-to-pole distance in meters.
+        tilt_deg: camera tilt angle used by projection model.
+        camera_height_m: camera height above the wire plane.
+        origin: image origin used by projection model.
+        pixels_per_meter: optional calibration value. If None, estimate from endpoints.
+        fit_equation: model selector passed to wire_shape.
+        anchor_origin: shift first reconstructed point to (0,0,0).
+        constrain_ends: scale x so final point lands at x=span.
+
+    Returns:
+        dict with reconstructed points, fitted parabola coefficients, and derived sag estimate.
+    """
+    pts = [(float(u), float(v)) for u, v in measured_points]
+    if len(pts) < 3:
+        raise ValueError("Need at least 3 measured points to fit a parabola.")
+
+    # If calibration is not given, use endpoint pixel separation as a simple estimate.
+    if pixels_per_meter is None:
+        p0 = np.array(pts[0], dtype=float)
+        p1 = np.array(pts[-1], dtype=float)
+        pix_dist = float(np.linalg.norm(p1 - p0))
+        pixels_per_meter = pix_dist / max(float(span), 1e-9)
+
+    reconstructed = wire_shape(
+        pts,
+        fit_equation,
+        chlen=float(pixels_per_meter),
+        distance=float(span),
+        anchor_origin=bool(anchor_origin),
+        constrain_ends=bool(constrain_ends),
+        camera_params={
+            "pixels_per_meter": float(pixels_per_meter),
+            "tilt_deg": float(tilt_deg),
+            "origin": (float(origin[0]), float(origin[1])),
+            "camera_height_m": float(camera_height_m),
+        },
+    )
+
+    rx = np.array([p[0] for p in reconstructed], dtype=float)
+    rz = np.array([p[2] for p in reconstructed], dtype=float)
+    a, b, c = np.polyfit(rx, rz, 2)
+
+    # Sag estimated as max vertical drop below the line connecting endpoints.
+    x0, z0 = float(rx[0]), float(rz[0])
+    x1, z1 = float(rx[-1]), float(rz[-1])
+    denom = max(abs(x1 - x0), 1e-9)
+    t = (rx - x0) / denom
+    z_line = z0 + t * (z1 - z0)
+    sag_est = float(np.max(z_line - rz))
+
+    return {
+        "reconstructed_points": reconstructed,
+        "estimated_pixels_per_meter": float(pixels_per_meter),
+        "fitted_parabola": {
+            "a": float(a),
+            "b": float(b),
+            "c": float(c),
+        },
+        "estimated_sag_m": sag_est,
+    }
+
+
+def plot_measured_and_estimated_curve(
+    measured_points,
+    reconstruction_result,
+    tilt_deg,
+    camera_height_m,
+    origin=(120.0, 260.0),
+    pixels_per_meter=None,
+    output_png=None,
+    show=True,
+):
+    """
+    Plot measured image points with estimated curve overlay plus X-Z reconstruction view.
+
+    Args:
+        measured_points: list of measured image points (u, v).
+        reconstruction_result: output dict from reconstruct_from_measured_points(...).
+        tilt_deg: camera tilt in degrees.
+        camera_height_m: camera height used for projection model.
+        origin: image origin used for projection model.
+        pixels_per_meter: optional pixel scale; defaults to reconstruction_result estimate.
+        output_png: optional path to save the figure.
+        show: whether to display with plt.show().
+    """
+    measured = np.array(measured_points, dtype=float)
+    if measured.ndim != 2 or measured.shape[1] != 2:
+        raise ValueError("measured_points must be a list of (u, v) tuples.")
+
+    reconstructed = np.array(reconstruction_result["reconstructed_points"], dtype=float)
+    if reconstructed.ndim != 2 or reconstructed.shape[1] != 3:
+        raise ValueError("reconstruction_result['reconstructed_points'] must be Nx3.")
+
+    fit = reconstruction_result["fitted_parabola"]
+    a = float(fit["a"])
+    b = float(fit["b"])
+    c = float(fit["c"])
+
+    ppm = float(
+        pixels_per_meter
+        if pixels_per_meter is not None
+        else reconstruction_result["estimated_pixels_per_meter"]
+    )
+
+    tilt = math.radians(float(tilt_deg))
+    height_scale = 1.0 / (1.0 + max(float(camera_height_m), 0.0))
+    k = max(ppm * height_scale, 1e-9)
+
+    rx = reconstructed[:, 0]
+    rz = reconstructed[:, 2]
+    x_dense = np.linspace(float(rx.min()), float(rx.max()), 300)
+    z_dense = a * x_dense * x_dense + b * x_dense + c
+
+    # Forward project estimated curve from world (x,z) to image (u,v).
+    u_curve = float(origin[0]) + k * x_dense
+    v_curve = float(origin[1]) + k * (x_dense * math.sin(tilt) - z_dense * math.cos(tilt))
+
+    # Also project reconstructed sampled points for visual alignment.
+    u_rec = float(origin[0]) + k * rx
+    v_rec = float(origin[1]) + k * (rx * math.sin(tilt) - rz * math.cos(tilt))
+
+    fig, (ax_img, ax_xz) = plt.subplots(1, 2, figsize=(13, 5), constrained_layout=True)
+
+    ax_img.scatter(measured[:, 0], measured[:, 1], s=24, color="tab:blue", label="Measured points", alpha=0.9)
+    ax_img.plot(u_curve, v_curve, color="tab:orange", linewidth=2.0, label="Estimated curve")
+    ax_img.plot(u_rec, v_rec, "o", color="tab:red", markersize=4, alpha=0.75, label="Projected recon points")
+    ax_img.set_title("Image Space: Measured vs Estimated")
+    ax_img.set_xlabel("u (px)")
+    ax_img.set_ylabel("v (px)")
+    ax_img.grid(True, alpha=0.3)
+    ax_img.legend(loc="best")
+    ax_img.invert_yaxis()
+
+    ax_xz.scatter(rx, rz, s=24, color="tab:blue", label="Reconstructed points", alpha=0.9)
+    ax_xz.plot(x_dense, z_dense, color="tab:orange", linewidth=2.0, label="Fitted parabola")
+    ax_xz.set_title("World Space: Reconstructed X-Z")
+    ax_xz.set_xlabel("x (m)")
+    ax_xz.set_ylabel("z (m)")
+    ax_xz.grid(True, alpha=0.3)
+    ax_xz.legend(loc="best")
+
+    if output_png is not None:
+        fig.savefig(output_png, dpi=150)
+    if show:
+        plt.show()
+    plt.close(fig)
+
+
+def plot_xz_points_with_parabola(
+    reconstruction_result,
+    output_png=None,
+    show=True,
+    title="Reconstructed Points and Fitted Parabola (X-Z)",
+):
+    """Plot reconstructed 3D points on X-Z plane with fitted parabola overlay."""
+    reconstructed = np.array(reconstruction_result["reconstructed_points"], dtype=float)
+    if reconstructed.ndim != 2 or reconstructed.shape[1] != 3:
+        raise ValueError("reconstruction_result['reconstructed_points'] must be Nx3.")
+
+    fit = reconstruction_result["fitted_parabola"]
+    a = float(fit["a"])
+    b = float(fit["b"])
+    c = float(fit["c"])
+
+    x = reconstructed[:, 0]
+    z = reconstructed[:, 2]
+
+    x_dense = np.linspace(float(x.min()), float(x.max()), 300)
+    z_dense = a * x_dense * x_dense + b * x_dense + c
+
+    fig, ax = plt.subplots(figsize=(8, 5), constrained_layout=True)
+    ax.scatter(x, z, s=28, color="tab:blue", alpha=0.9, label="Reconstructed points")
+    ax.plot(x_dense, z_dense, color="tab:orange", linewidth=2.0, label="Fitted parabola")
+    ax.set_title(title)
+    ax.set_xlabel("x (m)")
+    ax.set_ylabel("z (m)")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best")
+
+    if output_png is not None:
+        fig.savefig(output_png, dpi=150)
+    if show:
+        plt.show()
+    plt.close(fig)
 
 
 def save_sag_height_heatmap_from_csv(csv_path, output_png):
