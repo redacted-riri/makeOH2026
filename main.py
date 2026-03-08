@@ -8,6 +8,10 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import tkinter as tk
 from datetime import datetime
+import time
+import json
+import urllib.error
+import urllib.request
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
@@ -25,6 +29,62 @@ minimum_flagged_area = 100
 
 upper_bound_yellow = np.array([30, 255, 255])  # don't change
 lower_bound_yellow = np.array([20, 100, 100])  # alter as needed : currently flags glazed chair wood (darker orangish) ~hex aa632b 965511 a5632f
+
+
+def fetch_columbus_weather():
+    """
+    Fetch current weather for Columbus, OH from weather.gov nearest observation station.
+
+    Returns:
+        dict with keys: temp_c, wind_mph, station_id
+    Raises:
+        RuntimeError if API data cannot be retrieved/parsed.
+    """
+    lat, lon = 39.9612, -82.9988
+    headers = {
+        "User-Agent": "Make26SagTracker/1.0 (local app)",
+        "Accept": "application/geo+json",
+    }
+
+    points_url = f"https://api.weather.gov/points/{lat},{lon}"
+    req_points = urllib.request.Request(points_url, headers=headers)
+    with urllib.request.urlopen(req_points, timeout=6) as resp:
+        points_data = json.loads(resp.read().decode("utf-8"))
+
+    stations_url = points_data.get("properties", {}).get("observationStations")
+    if not stations_url:
+        raise RuntimeError("No observation stations URL returned by weather.gov points API")
+
+    req_stations = urllib.request.Request(stations_url, headers=headers)
+    with urllib.request.urlopen(req_stations, timeout=6) as resp:
+        stations_data = json.loads(resp.read().decode("utf-8"))
+
+    features = stations_data.get("features", [])
+    if not features:
+        raise RuntimeError("No nearby weather stations found for Columbus")
+
+    station_id = features[0].get("properties", {}).get("stationIdentifier")
+    if not station_id:
+        raise RuntimeError("Station identifier missing from weather.gov response")
+
+    latest_url = f"https://api.weather.gov/stations/{station_id}/observations/latest"
+    req_latest = urllib.request.Request(latest_url, headers=headers)
+    with urllib.request.urlopen(req_latest, timeout=6) as resp:
+        latest_data = json.loads(resp.read().decode("utf-8"))
+
+    props = latest_data.get("properties", {})
+    temp_c = props.get("temperature", {}).get("value")
+    wind_mps = props.get("windSpeed", {}).get("value")
+
+    if temp_c is None or wind_mps is None:
+        raise RuntimeError("Missing temperature or wind speed in latest observation")
+
+    wind_mph = float(wind_mps) * 2.2369362921
+    return {
+        "temp_c": float(temp_c),
+        "wind_mph": float(wind_mph),
+        "station_id": str(station_id),
+    }
 class faultresponse():
 
     def __init__(self, values = {'flags': 10, 'sag': .05, 
@@ -239,6 +299,9 @@ class SagTrackerUI:
         self.latest_points = []
         self.photo = None
         self.frame_count = 0
+        self.latest_weather = None
+        self.module_weather = {}
+        self.last_weather_refresh_ts = 0.0
 
         self.main_menu = tk.Frame(self.root)
         self.camera_screen = tk.Frame(self.root)
@@ -330,10 +393,24 @@ class SagTrackerUI:
         tk.Button(top_right, text="Open Selected Module", command=self.open_selected_module).pack(fill="x", pady=3)
         tk.Button(top_right, text="Register New Camera Module", command=self.show_register_screen).pack(fill="x", pady=3)
         tk.Button(top_right, text="Open Bug Reports", command=self.show_bug_report_screen).pack(fill="x", pady=3)
+        tk.Button(top_right, text="Refresh Module 1 Weather", command=lambda: self.refresh_module_weather(force=True)).pack(fill="x", pady=3)
         tk.Button(top_right, text="Start Camera", command=self.start_camera).pack(fill="x", pady=3)
         tk.Button(top_right, text="Stop Camera", command=self.stop_camera).pack(fill="x", pady=3)
         tk.Button(top_right, text="Save Compare PNG", command=self.save_compare_from_latest).pack(fill="x", pady=3)
         tk.Button(top_right, text="Back to Menu", command=self.show_main_menu).pack(fill="x", pady=3)
+
+        self.weather_module1_label = tk.Label(
+            top_right,
+            text="Camera Module 1 Weather: loading...",
+            justify="left",
+            anchor="w",
+            bg="#1b1b1b",
+            fg="#d7f4ff",
+            font=("Consolas", 9),
+            padx=8,
+            pady=6,
+        )
+        self.weather_module1_label.pack(fill="x", pady=(6, 4))
 
         self.error_module_frame = tk.Frame(top_right, bg="#6b0000", highlightthickness=2, highlightbackground="#ff3b30")
         self.error_module_title = tk.Label(
@@ -618,7 +695,39 @@ class SagTrackerUI:
         self.main_menu.pack_forget()
         self.register_screen.pack_forget()
         self.camera_screen.pack(fill="both", expand=True)
+        self.refresh_module_weather(force=True)
         self.start_camera()
+
+    def refresh_module_weather(self, force=False):
+        now = time.time()
+        if (not force) and (now - self.last_weather_refresh_ts < 60.0):
+            return
+
+        try:
+            weather = fetch_columbus_weather()
+            self.latest_weather = weather
+            self.module_weather["Camera Module 1"] = weather
+            self.last_weather_refresh_ts = now
+            stamp = datetime.now().strftime("%H:%M:%S")
+            self.weather_module1_label.config(
+                text=(
+                    "Camera Module 1 Weather\n"
+                    f"Temp: {weather['temp_c']:.1f} C\n"
+                    f"Wind: {weather['wind_mph']:.1f} mph\n"
+                    f"Station: {weather['station_id']}\n"
+                    f"Updated: {stamp}"
+                )
+            )
+        except (RuntimeError, urllib.error.URLError, TimeoutError, ValueError) as exc:
+            self.weather_module1_label.config(
+                text=(
+                    "Camera Module 1 Weather\n"
+                    "Temp: unavailable\n"
+                    "Wind: unavailable\n"
+                    f"Reason: {exc}"
+                )
+            )
+            self.log(f"Module 1 weather refresh failed: {exc}")
 
     def show_error_module_card(self, reason):
         self.error_module_desc.config(
@@ -727,6 +836,8 @@ class SagTrackerUI:
 
         if self.frame_count % 5 == 0:
             self.update_xz_plot(points)
+        if self.frame_count % 150 == 0:
+            self.refresh_module_weather(force=False)
 
         self.root.after(20, self._update_camera_frame)
 
@@ -789,14 +900,32 @@ class SagTrackerUI:
             except Exception as exc:
                 self.log(f"Error module: failed to estimate sag ({exc})")
 
+        # Pull live local weather for Columbus; fall back if API is unavailable.
+        temp_c = 30.0
+        wind_mph = 20.0
+        weather_note = "(fallback weather values)"
+        try:
+            weather = fetch_columbus_weather()
+            temp_c = float(weather["temp_c"])
+            wind_mph = float(weather["wind_mph"])
+            self.latest_weather = weather
+            weather_note = f"(station {weather['station_id']})"
+        except (RuntimeError, urllib.error.URLError, TimeoutError, ValueError) as exc:
+            self.log(f"Weather API unavailable, using fallback values: {exc}")
+
         checker = faultresponse(values={"flags": 3, "sag": 5.0, "temp": 50, "m": None, "wind": 40})
         checker.measure({
             "flags": len(self.latest_points),
             "sag": sag_est,
-            "temp": 30,
-            "wind": 20,
+            "temp": temp_c,
+            "wind": wind_mph,
         })
         tripped = checker.trip()
+
+        self.log(
+            f"Measurements -> flags={len(self.latest_points)}, sag={sag_est:.2f} m, "
+            f"temp={temp_c:.1f} C, wind={wind_mph:.1f} mph {weather_note}"
+        )
 
         if tripped is not None:
             self.log(f"Error tripped: {tripped}")
